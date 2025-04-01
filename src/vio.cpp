@@ -383,6 +383,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
   // printf("pg size: %zu \n", pg.size());
 
+  // 遍历点云中的每个点，将当前帧激光点云投影到深度图中
   for (int i = 0; i < pg.size(); i++)
   {
     // double t0 = omp_get_wtime();
@@ -394,6 +395,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       loc_xyz[j] = floor(pt_w[j] / voxel_size);
       if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
     }
+    // 计算点云中每个点在体素网格中的位置
     VOXEL_LOCATION position(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
 
     // t_position += omp_get_wtime()-t0;
@@ -406,6 +408,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     // t_insert += omp_get_wtime()-t1;
     // double t2 = omp_get_wtime();
 
+    //将点云中的点转换到相机坐标系下
     V3D pt_c(new_frame_->w2f(pt_w));
 
     if (pt_c[2] > 0)
@@ -413,6 +416,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       V2D px;
       // px[0] = fx * pt_c[0]/pt_c[2] + cx;
       // px[1] = fy * pt_c[1]/pt_c[2]+ cy;
+      //将点从相机坐标系转换到像素坐标系
       px = new_frame_->cam_->world2cam(pt_c);
 
       if (new_frame_->cam_->isInFrame(px.cast<int>(), border))
@@ -421,6 +425,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         float depth = pt_c[2];
         int col = int(px[0]);
         int row = int(px[1]);
+        //将激光点云投影到深度图中
         it[width * row + col] = depth;
       }
     }
@@ -437,6 +442,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // double t1 = omp_get_wtime();
   vector<VOXEL_LOCATION> DeleteKeyList;
 
+  // 遍历体素网格中的每个体素, 找到距离当前图像帧的每个网格最近的点进行存储：retrieve_voxel_points
   for (auto &iter : sub_feat_map)
   {
     VOXEL_LOCATION position = iter.first;
@@ -451,6 +457,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       std::vector<VisualPoint *> &voxel_points = corre_voxel->second->voxel_points;
       int voxel_num = voxel_points.size();
 
+      //遍历体素中的每个点，得到体素中距离当前帧最近的点进行存储：retrieve_voxel_points
       for (int i = 0; i < voxel_num; i++)
       {
         VisualPoint *pt = voxel_points[i];
@@ -590,6 +597,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     }
   }
 
+  // 删除不在视野中的体素
   for (auto &key : DeleteKeyList)
   {
     sub_feat_map.erase(key);
@@ -602,9 +610,15 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // double t_2, t_3, t_4, t_5;
   // t_2=t_3=t_4=t_5=0;
 
+  //遍历图像帧中的每个图像块，
+  //1、建立图像块中特征点与参考图像块的关联（找到参考图像块与当前帧图像块之间的仿射变换矩阵以及金字塔最佳搜索级别）
+  //2、保留空间连续的特征点
+  //3、计算参考图像块与当前帧图像块之间的光度误差，如果光度误差大于阈值，则跳过该点
+  //3、如果启用了NCC，则计算参考图像块与当前帧图像块之间的NCC值，如果NCC值小于阈值，则跳过该点
+  //4、将保留的特征三维点添加到视觉子地图中
   for (int i = 0; i < length; i++)
   {
-    if (grid_num[i] == TYPE_MAP)
+    if (grid_num[i] == TYPE_MAP)  // 如果网格中存储的是地图点
     {
       // double t_1 = omp_get_wtime();
 
@@ -617,6 +631,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       V3D pt_cam(new_frame_->w2f(pt->pos_));
       bool depth_continous = false;
+      //检测图像网格中跟踪的点是否连续
       for (int u = -patch_size_half; u <= patch_size_half; u++)
       {
         for (int v = -patch_size_half; v <= patch_size_half; v++)
@@ -650,6 +665,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       if (!pt->is_normal_initialized_) continue;
 
+      //计算该网格中跟踪的点选择一个最佳的参考图像块，具体来说，它通过计算光度误差来选择一个最能代表该特征点的图像块
       if (normal_en)
       {
         float phtometric_errors_min = std::numeric_limits<float>::max();
@@ -693,9 +709,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       }
       else
       {
+        //通过getCloseViewObs函数，找到与当前帧位置最接近的参考图像块,主要是通过计算当前帧与参考帧之间的方向向量，并找到与该方向向量最接近的参考图像块
         if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, pc)) continue;
       }
 
+      // 计算参考帧到当前帧的仿射变换矩阵，以及当前帧的金字塔最佳搜索级别
       if (normal_en)
       {
         V3D norm_vec = (ref_ftr->T_f_w_.rotation_matrix() * pt->normal_).normalized();
@@ -709,8 +727,10 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
         SE3 T_cur_ref = new_frame_->T_f_w_ * ref_ftr->T_f_w_.inverse();
 
+        // 计算参考帧到当前帧的仿射变换矩阵
         getWarpMatrixAffineHomography(*cam, ref_ftr->px_, pf, norm_vec, T_cur_ref, 0, A_cur_ref_zero);
 
+        //根据仿射变换矩阵计算金字塔最佳搜索级别
         search_level = getBestSearchLevel(A_cur_ref_zero, 2);
       }
       else
@@ -736,6 +756,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       // t_1 = omp_get_wtime();
 
+      //将参考图像块在不同金字塔级别进行仿射变换到当前帧的图像块
       for (int pyramid_level = 0; pyramid_level <= patch_pyrimid_level - 1; pyramid_level++)
       {
         warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level, patch_size_half, patch_wrap.data());
@@ -744,12 +765,14 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       getImagePatch(img, pc, patch_buffer.data(), 0);
 
       float error = 0.0;
+      //计算参考图像块与当前帧图像块之间的光度误差
       for (int ind = 0; ind < patch_size_total; ind++)
       {
         error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]) *
                  (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]);
       }
 
+      //如果启用了NCC，则计算参考图像块与当前帧图像块之间的NCC值
       if (ncc_en)
       {
         double ncc = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
@@ -760,6 +783,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         }
       }
 
+      //如果光度误差大于阈值，则跳过该点
       if (error > outlier_threshold * patch_size_total) continue;
 
       visual_submap->voxel_points.push_back(pt);
@@ -806,6 +830,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   if (pg.size() <= 10) return;
 
   // double t0 = omp_get_wtime();
+  //遍历激光点云帧，将点云投影到图像帧中，为每个图像块选择角点分数更高的点。
   for (int i = 0; i < pg.size(); i++)
   {
     if (pg[i].normal == V3D(0, 0, 0)) continue;
@@ -831,6 +856,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
     }
   }
 
+  //（raycasting module on）遍历体素地图，将体素地图中的点投影到图像帧中，为每个图像块选择角点分数更高的点。
   for (int j = 0; j < visual_submap->add_from_voxel_map.size(); j++)
   {
     V3D pt = visual_submap->add_from_voxel_map[j].point_w;
@@ -857,6 +883,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   // t0 = omp_get_wtime();
 
   int add = 0;
+  //遍历图像块，给feat_map添加特征点(来自于每个图像块关联的特征点)
   for (int i = 0; i < length; i++)
   {
     if (grid_num[i] == TYPE_POINTCLOUD) // && (scan_value[i]>=50))
@@ -907,6 +934,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
 void VIOManager::updateVisualMapPoints(cv::Mat img)
 {
+  //遍历当前帧的特征点所跟踪的空间点，为这些点添加所观察参考帧。
   if (total_points == 0) return;
 
   int update_num = 0;
@@ -1101,6 +1129,14 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
 
 void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  /*
+  主要功能（gpt生成）：
+  1、将参考帧的特征点投影到当前帧
+  2、考虑视角变化导致的图像变形
+  3、计算光度误差
+  4、生成可视化结果
+  5、支持多层金字塔处理
+  */
   if (total_points == 0) return;
   // if(new_frame_->id_ != 2) return; //124
 
@@ -1796,31 +1832,39 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
+  // 创建新帧
   new_frame_.reset(new Frame(cam, img));
+  // 更新帧与世界坐标系的关系
   updateFrameState(*state);
-  
+
+  // 重置图片网格相关数据结构
   resetGrid();
 
   double t1 = omp_get_wtime();
 
+  //根据激光雷达点云，为图像块筛选特征点，同时建立对应空间点与参考图像块的关联，保存相应的空间点
   retrieveFromVisualSparseMap(img, pg, feat_map);
 
   double t2 = omp_get_wtime();
 
+  //优化得到当前帧的位姿
   computeJacobianAndUpdateEKF(img);
 
   double t3 = omp_get_wtime();
 
+  //更新视觉子地图，将当前帧的特征点添加到视觉子地图featmap中
   generateVisualMapPoints(img, pg);
 
   double t4 = omp_get_wtime();
   
+  //画出图像块中跟踪到的特征点
   plotTrackedPoints();
 
   if (plot_flag) projectPatchFromRefToCur(feat_map);
 
   double t5 = omp_get_wtime();
 
+  //为当前图像块跟踪的点添加所观察参考帧（即当前帧）
   updateVisualMapPoints(img);
 
   double t6 = omp_get_wtime();

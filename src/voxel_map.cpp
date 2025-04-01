@@ -337,6 +337,7 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  // 清理并预分配存储空间
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -348,12 +349,19 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
   for (size_t i = 0; i < feats_down_body_->size(); i++)
   {
+    // 获取当前点
     V3D point_this(feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z);
-    if (point_this[2] == 0) { point_this[2] = 0.001; }
+    if (point_this[2] == 0) { point_this[2] = 0.001; }  // 避免除零
+    
+    // 计算点的协方差
     M3D var;
     calcBodyCov(point_this, config_setting_.dept_err_, config_setting_.beam_err_, var);
     body_cov_list_.push_back(var);
+    
+    // 转换到IMU坐标系
     point_this = extR_ * point_this + extT_;
+    
+    // 计算叉积矩阵（用于雅可比计算）
     M3D point_crossmat;
     point_crossmat << SKEW_SYM_MATRX(point_this);
     cross_mat_list_.push_back(point_crossmat);
@@ -372,16 +380,21 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
     double total_residual = 0.0;
+    // 计算点云在世界坐标系下的位置
     pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
+    
+    // 获取旋转协方差和位置协方差
     M3D rot_var = state_.cov.block<3, 3>(0, 0);
     M3D t_var = state_.cov.block<3, 3>(3, 3);
     for (size_t i = 0; i < feats_down_body_->size(); i++)
     {
       pointWithVar &pv = pv_list_[i];
+      //保存体坐标系和世界坐标系下的点
       pv.point_b << feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z;
       pv.point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
 
+      // 计算点的完整协方差
       M3D cov = body_cov_list_[i];
       M3D point_crossmat = cross_mat_list_[i];
       cov = state_.rot_end * cov * state_.rot_end.transpose() + (-point_crossmat) * rot_var * (-point_crossmat.transpose()) + t_var;
@@ -392,6 +405,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     // double t1 = omp_get_wtime();
 
+    // 构建残差列表
     BuildResidualListOMP(pv_list_, ptpl_list_);
 
     // build_residual_time += omp_get_wtime() - t1;
@@ -608,22 +622,23 @@ V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
 
 void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_points)
 {
-  float voxel_size = config_setting_.max_voxel_size_;
-  float planer_threshold = config_setting_.planner_threshold_;
-  int max_layer = config_setting_.max_layer_;
-  int max_points_num = config_setting_.max_points_num_;
-  std::vector<int> layer_init_num = config_setting_.layer_init_num_;
-  uint plsize = input_points.size();
+  float voxel_size = config_setting_.max_voxel_size_;        // 体素大小
+  float planer_threshold = config_setting_.planner_threshold_;// 平面特征阈值
+  int max_layer = config_setting_.max_layer_;                // 八叉树最大层数
+  int max_points_num = config_setting_.max_points_num_;      // 每个体素最大点数
+  std::vector<int> layer_init_num = config_setting_.layer_init_num_; // 每层初始点数
+  uint plsize = input_points.size();                         // 输入点云大小
   for (uint i = 0; i < plsize; i++)
   {
     const pointWithVar p_v = input_points[i];
     float loc_xyz[3];
     for (int j = 0; j < 3; j++)
     {
-      loc_xyz[j] = p_v.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+      loc_xyz[j] = p_v.point_w[j] / voxel_size;  // 计算点云在世界坐标系下的体素位置
+      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }  // 处理负坐标
     }
     VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    //体素更新或创建，体素的key是体素位置，value是体素八叉树
     auto iter = voxel_map_.find(position);
     if (iter != voxel_map_.end()) { voxel_map_[position]->UpdateOctoTree(p_v); }
     else
